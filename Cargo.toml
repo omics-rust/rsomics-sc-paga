@@ -1,0 +1,32 @@
+[package]
+name = "rsomics-sc-paga"
+version = "0.1.0"
+description = "PAGA partition-based graph abstraction connectivity — scanpy sc.tl.paga (v1.2 / v1.0) cluster-connectivity matrix + connectivities_tree from a kNN neighbors graph and cluster labels"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/omics-rust/rsomics-sc-paga"
+authors = ["Zane Leong <efd@live.com>"]
+keywords = ["bioinformatics", "single-cell", "scanpy", "paga", "graph"]
+categories = ["science", "command-line-utilities"]
+
+[[bin]]
+name = "rsomics-sc-paga"
+path = "src/main.rs"
+
+[lib]
+name = "rsomics_sc_paga"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+rsomics-common = { version = "0.6" }
+rsomics-help = { version = "0.3" }
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "bench"
+harness = false
