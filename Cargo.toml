@@ -1,6 +1,6 @@
 [package]
 name = "rsomics-sc-paga"
-version = "0.1.0"
+version = "0.1.1"
 description = "PAGA partition-based graph abstraction connectivity — scanpy sc.tl.paga (v1.2 / v1.0) cluster-connectivity matrix + connectivities_tree from a kNN neighbors graph and cluster labels"
 edition = "2024"
 rust-version = "1.91"

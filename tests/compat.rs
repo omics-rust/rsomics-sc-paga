@@ -122,7 +122,7 @@ fn matches_committed_scanpy_golden_v1_2() {
 fn matches_committed_scanpy_golden_v1_0() {
     let tmp = std::env::temp_dir().join("rsomics_sc_paga_golden_v10");
     std::fs::create_dir_all(&tmp).unwrap();
-    let (conn, _tree) = run_ours(
+    let (conn, tree) = run_ours(
         &golden("connectivities.tsv"),
         &golden("groups.tsv"),
         "v1.0",
@@ -136,6 +136,44 @@ fn matches_committed_scanpy_golden_v1_0() {
     let rel = max_rel(&ours_conn, &gold_conn);
     assert!(abs < 1e-9, "v1.0 connectivities max abs err {abs:e}");
     assert!(rel < 1e-9, "v1.0 connectivities max rel err {rel:e}");
+
+    // scanpy `_get_connectivities_tree_v1_0` runs the MST on the RAW inter-cluster
+    // edge counts, not the scaled connectivities.
+    let ours_tree = read_labelled(&tree);
+    let gold_tree = read_numeric(&golden("scanpy_tree_v1.0.tsv"));
+    let tabs = max_abs(&ours_tree, &gold_tree);
+    assert!(tabs < 1e-9, "v1.0 connectivities_tree max abs err {tabs:e}");
+}
+
+/// The v1.0 tree must be selected from the raw edge-count graph, not the scaled
+/// connectivities. On this fixture (clusters A={0,1} B={2,3} C={4..11},
+/// n_neighbors=3) the two rankings disagree: raw counts A-B=3 < A-C=B-C=4, but the
+/// scaled connectivity A-B=0.5 is the largest. scanpy keeps {A-C, B-C} (drops the
+/// lowest-count A-B); the earlier scaled-connectivity MST kept {A-B, A-C}. Without
+/// this fixture the bug is invisible — the 8-cluster golden is a chain whose tree
+/// is identical either way.
+#[test]
+fn matches_committed_scanpy_golden_v1_0_tree_discriminating() {
+    let tmp = std::env::temp_dir().join("rsomics_sc_paga_golden_v10_disc");
+    std::fs::create_dir_all(&tmp).unwrap();
+    let (_conn, tree) = run_ours(
+        &golden("disc_v10_graph.tsv"),
+        &golden("disc_v10_groups.tsv"),
+        "v1.0",
+        Some(3),
+        &tmp,
+    );
+
+    let ours_tree = read_labelled(&tree);
+    let gold_tree = read_numeric(&golden("scanpy_tree_disc_v1.0.tsv"));
+    let tabs = max_abs(&ours_tree, &gold_tree);
+    assert!(tabs < 1e-9, "v1.0 discriminating tree max abs err {tabs:e}");
+
+    // Guard the exact edge set: A-C and B-C present, A-B absent.
+    let third = 1.0_f64 / 3.0;
+    assert!((ours_tree[0][2] - third).abs() < 1e-12, "A-C must be kept");
+    assert!((ours_tree[1][2] - third).abs() < 1e-12, "B-C must be kept");
+    assert_eq!(ours_tree[0][1], 0.0, "A-B must be dropped");
 }
 
 #[test]

@@ -40,17 +40,26 @@ impl Paga {
         model: Model,
         n_neighbors: Option<usize>,
     ) -> Result<Paga> {
-        let connectivities = match model {
-            Model::V1_2 => connectivities_v1_2(graph, groups),
+        let k = groups.categories.len();
+        let (connectivities, tree) = match model {
+            Model::V1_2 => {
+                let conn = connectivities_v1_2(graph, groups);
+                // v1.2 tree: MST on the scaled connectivities themselves.
+                let tree = connectivities_tree(&conn, &conn, k);
+                (conn, tree)
+            }
             Model::V1_0 => {
                 let nn = n_neighbors.ok_or_else(|| {
                     RsomicsError::InvalidInput("v1.0 model requires n_neighbors".into())
                 })?;
-                connectivities_v1_0(graph, groups, nn)
+                let (conn, inter_es) = connectivities_v1_0(graph, groups, nn);
+                // v1.0 tree: MST on the raw inter-cluster edge counts, not the
+                // scaled connectivities — the geometric-mean normaliser is per-pair
+                // so the two can rank edges differently.
+                let tree = connectivities_tree(&inter_es, &conn, k);
+                (conn, tree)
             }
         };
-        let k = groups.categories.len();
-        let tree = connectivities_tree(&connectivities, k);
         Ok(Paga {
             k,
             connectivities,
@@ -133,7 +142,10 @@ fn connectivities_v1_2(graph: &Graph, groups: &Groups) -> Vec<f64> {
 /// edge weight halved — equivalently `(inter[i][j] + inter[j][i]) / 2` over the
 /// directed stored entries. Then
 ///   `conn[i][j] = inter_es[i][j] / √(n_neighbors² · nᵢ · nⱼ)`.
-fn connectivities_v1_0(graph: &Graph, groups: &Groups, n_neighbors: usize) -> Vec<f64> {
+///
+/// Returns both the scaled connectivities and the raw `inter_es` edge-count
+/// matrix; the latter feeds the v1.0 tree MST (scanpy `_get_connectivities_tree_v1_0`).
+fn connectivities_v1_0(graph: &Graph, groups: &Groups, n_neighbors: usize) -> (Vec<f64>, Vec<f64>) {
     let k = groups.categories.len();
     let codes = &groups.codes;
 
@@ -149,6 +161,7 @@ fn connectivities_v1_0(graph: &Graph, groups: &Groups, n_neighbors: usize) -> Ve
     let ns: Vec<f64> = groups.sizes.iter().map(|&s| s as f64).collect();
     let nn_sq = (n_neighbors * n_neighbors) as f64;
 
+    let mut inter_es = vec![0f64; k * k];
     let mut conn = vec![0f64; k * k];
     for i in 0..k {
         for j in 0..k {
@@ -156,6 +169,7 @@ fn connectivities_v1_0(graph: &Graph, groups: &Groups, n_neighbors: usize) -> Ve
                 continue;
             }
             let v = (inter[i * k + j] + inter[j * k + i]) as f64 / 2.0;
+            inter_es[i * k + j] = v;
             if v == 0.0 {
                 continue;
             }
@@ -163,19 +177,23 @@ fn connectivities_v1_0(graph: &Graph, groups: &Groups, n_neighbors: usize) -> Ve
             conn[i * k + j] = if geom != 0.0 { v / geom } else { 1.0 };
         }
     }
-    conn
+    (conn, inter_es)
 }
 
-/// scanpy `_get_connectivities_tree_v1_2`. Invert the nonzero connectivities,
-/// take the minimum spanning tree of that symmetric graph (so the tree maximises
-/// total confidence), and re-store the original `connectivities` value on each
+/// scanpy `_get_connectivities_tree_v1_x`. Take the minimum spanning tree of the
+/// symmetric graph whose edge weights are `1 / mst_weights[i][j]` (so the tree
+/// maximises the total of `mst_weights`), then store the `store` value on each
 /// tree edge oriented `i < j` — matching scipy's upper-triangular MST output.
-fn connectivities_tree(conn: &[f64], k: usize) -> Vec<f64> {
-    let edges = min_spanning_tree(conn, k);
+///
+/// v1.2 runs the MST on the scaled connectivities (`mst_weights == store`); v1.0
+/// runs it on the raw inter-cluster edge counts while storing the connectivities,
+/// which can pick a different edge set.
+fn connectivities_tree(mst_weights: &[f64], store: &[f64], k: usize) -> Vec<f64> {
+    let edges = min_spanning_tree(mst_weights, k);
     let mut tree = vec![0f64; k * k];
     for (i, j) in edges {
         let (a, b) = if i < j { (i, j) } else { (j, i) };
-        tree[a * k + b] = conn[a * k + b];
+        tree[a * k + b] = store[a * k + b];
     }
     tree
 }
@@ -274,7 +292,7 @@ mod tests {
     #[test]
     fn v1_0_exact_value() {
         let (g, gr) = fixture();
-        let conn = connectivities_v1_0(&g, &gr, 2);
+        let (conn, _inter_es) = connectivities_v1_0(&g, &gr, 2);
         assert!((conn[1] - 0.25).abs() < 1e-12, "got {}", conn[1]);
         assert_eq!(conn[0], 0.0);
     }
@@ -287,7 +305,7 @@ mod tests {
             0.8, 0.0, 0.5, //
             0.1, 0.5, 0.0,
         ];
-        let tree = connectivities_tree(&conn, 3);
+        let tree = connectivities_tree(&conn, &conn, 3);
         let at = |i: usize, j: usize| tree[i * 3 + j];
         // Edges (0,1) and (1,2) maximise confidence; (0,2)=0.1 dropped.
         assert_eq!(at(0, 1), 0.8);
@@ -296,5 +314,48 @@ mod tests {
         // strictly upper triangular
         assert_eq!(at(1, 0), 0.0);
         assert_eq!(at(2, 1), 0.0);
+    }
+
+    // v1.0 tree runs the MST on the RAW inter-cluster edge counts, not the scaled
+    // connectivities, so it can drop a different edge. Clusters A={0,1} B={2,3}
+    // C={4..11}, n_neighbors=3: inter_es A-B=3, A-C=4, B-C=4 → conn A-B=0.5,
+    // A-C=B-C=1/3. MST of 1/inter_es keeps A-C,B-C (drops the lowest-count A-B),
+    // whereas MST of 1/conn would keep the highest-conn A-B. scanpy v1.0 gives
+    // {A-C, B-C}.
+    #[test]
+    fn v1_0_tree_uses_raw_counts() {
+        let mut g = String::from("# 12\t12\t22\n");
+        let uedges = [
+            (0, 2),
+            (0, 3),
+            (1, 2),
+            (0, 4),
+            (0, 5),
+            (1, 6),
+            (1, 7),
+            (2, 8),
+            (2, 9),
+            (3, 10),
+            (3, 11),
+        ];
+        for (a, b) in uedges {
+            let _ = writeln!(g, "{a}\t{b}\t1");
+            let _ = writeln!(g, "{b}\t{a}\t1");
+        }
+        let mut labels = String::from("cell\tcluster\n");
+        for (i, l) in ["A", "A", "B", "B", "C", "C", "C", "C", "C", "C", "C", "C"]
+            .iter()
+            .enumerate()
+        {
+            let _ = writeln!(labels, "cell{i}\t{l}");
+        }
+        let graph = Graph::parse_triplets(g.as_bytes()).unwrap();
+        let groups = Groups::parse(labels.as_bytes()).unwrap();
+        let paga = Paga::compute(&graph, &groups, Model::V1_0, Some(3)).unwrap();
+        let at = |i: usize, j: usize| paga.tree[i * 3 + j];
+        let third = 1.0_f64 / 3.0;
+        assert!((at(0, 2) - third).abs() < 1e-15, "A-C {}", at(0, 2));
+        assert!((at(1, 2) - third).abs() < 1e-15, "B-C {}", at(1, 2));
+        assert_eq!(at(0, 1), 0.0, "A-B must be dropped");
     }
 }
