@@ -72,9 +72,9 @@ impl Tool for Cli {
 
         let graph_reader = open_source(&self.graph)?;
         let groups_reader = open_source(&self.groups)?;
-        let conn_out = open_sink(&self.out_connectivities)?;
+        let conn_out = open_sink(&self.out_connectivities, self.common.json)?;
         let tree_out = match self.out_tree.as_deref() {
-            Some(path) => Some(open_sink(path)?),
+            Some(path) => Some(open_sink(path, self.common.json)?),
             None => None,
         };
 
@@ -99,9 +99,13 @@ fn open_source(path: &PathBuf) -> Result<Box<dyn BufRead>> {
     }
 }
 
-fn open_sink(path: &str) -> Result<Box<dyn Write>> {
+fn open_sink(path: &str, json: bool) -> Result<Box<dyn Write>> {
     if path == "-" {
-        Ok(Box::new(BufWriter::new(std::io::stdout().lock())))
+        if json {
+            Ok(Box::new(std::io::sink()))
+        } else {
+            Ok(Box::new(BufWriter::new(std::io::stdout().lock())))
+        }
     } else {
         Ok(Box::new(BufWriter::new(
             File::create(path).map_err(RsomicsError::Io)?,
